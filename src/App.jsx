@@ -339,8 +339,15 @@ const TTS = {
     utt.pitch  = this._pitch;
     utt.volume = this._volume;
 
-    // Chrome bug: long utterances get cut off — split at sentence boundary
-    // and chain them with minimal gap
+    // Signal speech engine to ignore input while TTS is speaking
+    // Prevents mic from picking up TTS output as a command
+    utt.onstart = () => { window._ttsSpeaking = true; };
+    utt.onend   = () => {
+      // Resume listening 600ms after TTS ends (mouth closes, room settles)
+      setTimeout(() => { window._ttsSpeaking = false; }, 600);
+    };
+    utt.onerror = () => { window._ttsSpeaking = false; };
+
     setTimeout(() => {
       window.speechSynthesis.speak(utt);
     }, 80);
@@ -912,8 +919,8 @@ function useSpeechEngine({ onInterim, onFinal, enabled }) {
     rec.onerror = (e) => {
       if (e.error === "not-allowed") { setPermission("denied"); return; }
       if (e.error === "no-speech") {
-        // Normal in noisy env — just restart quietly
-        if (runRef.current) setTimeout(() => { if (runRef.current) startNew(); }, 200);
+        // Restart after longer pause — 200ms was causing rapid on/off in noisy envs
+        if (runRef.current) setTimeout(() => { if (runRef.current) startNew(); }, 800);
         return;
       }
       if (e.error === "audio-capture") {
@@ -932,27 +939,28 @@ function useSpeechEngine({ onInterim, onFinal, enabled }) {
 
     rec.onend = () => {
       if (runRef.current) {
-        // On mobile: shorter restart gap so we don't miss the next phrase
-        // On desktop: slightly longer to avoid thrashing
-        const delay = isMobile ? 100 : 250;
+        // Mobile: 300ms gap — fast enough to catch next phrase,
+        // long enough to avoid the mic blinking on/off visibly
+        // Desktop: 400ms — continuous mode rarely fires onend
+        const delay = isMobile ? 300 : 400;
         setTimeout(() => { if (runRef.current) startNew(); }, delay);
       }
     };
 
     rec.onresult = (ev) => {
-      // Clear silence timer on any result
+      // Skip all processing while TTS is speaking — prevents mic feedback loop
+      if (window._ttsSpeaking) return;
+
       clearTimeout(silenceTimerRef.current);
 
       for (let i = ev.resultIndex; i < ev.results.length; i++) {
         const res = ev.results[i];
 
         if (res.isFinal) {
-          // Pick best across all alternatives
           const { text, confidence } = pickBestAlternative(Array.from(res));
 
           if (!text) continue;
 
-          // Run through noise gate
           if (!passesNoiseGate(text, confidence)) {
             console.debug("[VCS] Noise gate rejected:", text, confidence.toFixed(2));
             continue;
@@ -2240,9 +2248,10 @@ export default function App() {
     if (/\b(hey\s*tim+[msyz]?|hey\s*timmy|timmy|timmie|timms|tims|tim\s*horton[s]?|yo\s*tim|hi\s*tim)\b/i.test(cleanText)) {
         setVoiceState("awake");
         notify("🎙️ Listening…", C.orange);
-        TTS.speak(buildWakeResponse());
         clearTimeout(awakeTimerRef.current);
         awakeTimerRef.current = setTimeout(()=>setVoiceState("idle"), 30000);
+        // Small delay so state updates render before TTS fires
+        setTimeout(() => TTS.speak(buildWakeResponse()), 120);
       }
       return;
     }
@@ -2365,54 +2374,12 @@ export default function App() {
       liveSpeaker, identifyCurrentSpeaker]);
 
   // ── Speech engine ──
-  // ── Continuous audio analyser — runs when voice is enabled ──
-  // Collects pitch/energy samples into livePitchBuf for speaker ID
+  // ── Speaker ID via transcript analysis (no separate mic stream) ──
+  // Avoids mic conflict with Web Speech API.
+  // We estimate speaker from interim text patterns + timing instead.
+  // Full Web Audio pitch capture only runs during enrollment.
   const audioCtxRef    = useRef(null);
   const audioStreamRef = useRef(null);
-
-  useEffect(() => {
-    if (!voiceEnabled) {
-      // Stop analyser when voice is off
-      audioStreamRef.current?.getTracks().forEach(t => t.stop());
-      audioCtxRef.current?.close().catch(()=>{});
-      audioCtxRef.current = null;
-      return;
-    }
-
-    let animId;
-    let analyser;
-
-    navigator.mediaDevices.getUserMedia({ audio: true, video: false })
-      .then(stream => {
-        audioStreamRef.current = stream;
-        const ctx = new (window.AudioContext || window.webkitAudioContext)();
-        audioCtxRef.current = ctx;
-        const src = ctx.createMediaStreamSource(stream);
-        analyser = ctx.createAnalyser();
-        analyser.fftSize = 2048;
-        src.connect(analyser);
-
-        const loop = () => {
-          animId = requestAnimationFrame(loop);
-          const { pitch, energy } = detectPitch(analyser);
-          if (pitch > 50 && energy > 0.01) {
-            livePitchBuf.current.push(pitch);
-          }
-          liveEnergyBuf.current.push(energy);
-          // Keep last 4 seconds (~120 frames at 30fps)
-          if (livePitchBuf.current.length  > 120) livePitchBuf.current.shift();
-          if (liveEnergyBuf.current.length > 120) liveEnergyBuf.current.shift();
-        };
-        loop();
-      })
-      .catch(() => {}); // Mic denied — silent fail, speaker ID won't work
-
-    return () => {
-      cancelAnimationFrame(animId);
-      audioStreamRef.current?.getTracks().forEach(t => t.stop());
-      audioCtxRef.current?.close().catch(()=>{});
-    };
-  }, [voiceEnabled]);
 
   const { supported, permission } = useSpeechEngine({
     onInterim:  useCallback((text)=>{ if(voiceState==="awake") setInterim(text); }, [voiceState]),
