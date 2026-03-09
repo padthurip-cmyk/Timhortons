@@ -469,61 +469,98 @@ function ConfidenceMeter({ value }) {
    SPEECH ENGINE HOOK — real Web Speech API
 ═══════════════════════════════════════════════════════════════ */
 function useSpeechEngine({ onInterim, onFinal, enabled }) {
-  const recRef = useRef(null);
-  const runRef = useRef(false);
+  const recRef  = useRef(null);
+  const runRef  = useRef(false);
+  const onFinalRef  = useRef(onFinal);
+  const onInterimRef = useRef(onInterim);
   const [supported, setSupported] = useState(false);
   const [permission, setPermission] = useState("unknown");
 
-  useEffect(() => {
+  // Keep refs current so closures never go stale
+  useEffect(() => { onFinalRef.current = onFinal; }, [onFinal]);
+  useEffect(() => { onInterimRef.current = onInterim; }, [onInterim]);
+
+  // Detect mobile — continuous mode is broken on Android/iOS Chrome
+  const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+
+  const buildRec = useCallback(() => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) { setSupported(false); return; }
-    setSupported(true);
+    if (!SR) return null;
 
     const rec = new SR();
-    rec.continuous = true;
+    // Mobile needs continuous=false — it auto-fires onend after each phrase
+    // Desktop uses continuous=true for always-on listening
+    rec.continuous     = !isMobile;
     rec.interimResults = true;
-    rec.lang = "en-US";
+    rec.lang           = "en-US";
     rec.maxAlternatives = 3;
 
     rec.onstart = () => setPermission("granted");
+
     rec.onerror = (e) => {
-      if (e.error === "not-allowed") setPermission("denied");
-      if (runRef.current && e.error !== "aborted") {
-        setTimeout(() => { if (runRef.current) try { rec.start(); } catch {} }, 1200);
+      if (e.error === "not-allowed") { setPermission("denied"); return; }
+      // On mobile, network errors are common — just restart quietly
+      if (runRef.current && !["aborted","no-speech"].includes(e.error)) {
+        setTimeout(() => { if (runRef.current) startNew(); }, 800);
       }
     };
+
     rec.onend = () => {
-      if (runRef.current) setTimeout(() => { try { rec.start(); } catch {} }, 300);
+      // Always restart on mobile (each phrase ends recognition)
+      // On desktop, only restart if still enabled
+      if (runRef.current) {
+        const delay = isMobile ? 150 : 300;
+        setTimeout(() => { if (runRef.current) startNew(); }, delay);
+      }
     };
+
     rec.onresult = (ev) => {
       for (let i = ev.resultIndex; i < ev.results.length; i++) {
         const res = ev.results[i];
-        const text = res[0].transcript;
+        const text = res[0].transcript.trim();
+        if (!text) continue;
         if (res.isFinal) {
-          const alternatives = Array.from(res).map(a => ({ text: a.transcript, score: a.confidence }));
-          onFinal(text, res[0].confidence || 0.85, alternatives);
+          onFinalRef.current(text, res[0].confidence || 0.85);
         } else {
-          onInterim(text);
+          onInterimRef.current(text);
         }
       }
     };
 
-    recRef.current = rec;
-    return () => { runRef.current = false; try { rec.stop(); } catch {} };
-  }, []);
+    return rec;
+  }, [isMobile]);
+
+  function startNew() {
+    try {
+      const rec = buildRec();
+      if (!rec) return;
+      recRef.current = rec;
+      rec.start();
+    } catch(e) {
+      // Already started or other transient error — retry
+      setTimeout(() => { if (runRef.current) startNew(); }, 600);
+    }
+  }
 
   const start = useCallback(() => {
     runRef.current = true;
-    try { recRef.current?.start(); } catch {}
-  }, []);
+    startNew();
+  }, [buildRec]);
 
   const stop = useCallback(() => {
     runRef.current = false;
     try { recRef.current?.stop(); } catch {}
+    try { recRef.current?.abort(); } catch {}
+  }, []);
+
+  useEffect(() => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    setSupported(!!SR);
   }, []);
 
   useEffect(() => {
     if (enabled) start(); else stop();
+    return () => stop();
   }, [enabled]);
 
   return { supported, permission, start, stop };
