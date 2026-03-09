@@ -144,6 +144,25 @@ function normalizeText(text) {
     .replace(/\s{2,}/g, ' ').trim();
 }
 
+/* ── Noise-adaptive pre-filter ───────────────────────────────
+   Applied before NLP parsing. Strips artifacts that appear
+   in speech-to-text output from noisy kitchen environments:
+   hesitation sounds, repeated words, partial words, and
+   common mis-transcriptions of kitchen background sounds.
+────────────────────────────────────────────────────────────── */
+function denoiseTranscript(text) {
+  return text
+    // Strip filler/hesitation words at start
+    .replace(/^(um+|uh+|er+|ah+|oh+|hmm+|like|so|well|okay|ok|right|yeah|yes|no|hey)\s+/gi, '')
+    // Strip repeated words (stutter or echo) e.g. "order order 6"
+    .replace(/(\w+)\s+/gi, '$1')
+    // Strip partial words at start (1-2 char fragments)
+    .replace(/^\w{1,2}\s+/g, '')
+    // Collapse multiple spaces
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
 function levenshtein(a, b) {
   if (Math.abs(a.length - b.length) > 3) return 99;
   const m = a.length, n = b.length;
@@ -177,7 +196,8 @@ function scoreItem(text, itemName, aliases) {
 }
 
 function parseCommand(rawText) {
-  const lower = normalizeText(rawText);
+  const denoised = denoiseTranscript(rawText);
+  const lower = normalizeText(denoised);
   let intent = null;
   for (const name of INTENT_PRIORITY) {
     if (INTENT_PATTERNS[name].test(lower)) { intent = name; break; }
@@ -788,60 +808,165 @@ function ConfidenceMeter({ value }) {
    SPEECH ENGINE HOOK — real Web Speech API
 ═══════════════════════════════════════════════════════════════ */
 function useSpeechEngine({ onInterim, onFinal, enabled }) {
-  const recRef  = useRef(null);
-  const runRef  = useRef(false);
-  const onFinalRef  = useRef(onFinal);
+  const recRef       = useRef(null);
+  const runRef       = useRef(false);
+  const onFinalRef   = useRef(onFinal);
   const onInterimRef = useRef(onInterim);
   const [supported, setSupported] = useState(false);
   const [permission, setPermission] = useState("unknown");
 
-  // Keep refs current so closures never go stale
-  useEffect(() => { onFinalRef.current = onFinal; }, [onFinal]);
+  // Noise filtering — track last N transcripts to detect repetitive noise
+  const noiseHistoryRef   = useRef([]);
+  const silenceTimerRef   = useRef(null);
+  const lastFinalTextRef  = useRef("");
+  const lastFinalTimeRef  = useRef(0);
+
+  useEffect(() => { onFinalRef.current  = onFinal;  }, [onFinal]);
   useEffect(() => { onInterimRef.current = onInterim; }, [onInterim]);
 
-  // Detect mobile — continuous mode is broken on Android/iOS Chrome
   const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+
+  /* ── Noise Gate ─────────────────────────────────────────────
+     Rejects transcripts that look like background noise:
+     1. Too short (< 2 real words)
+     2. Identical to the last thing we heard within 1.5s (echo/repeat)
+     3. Purely punctuation or filler sounds ("um", "uh", "mm", "ah")
+     4. Low confidence AND very short
+  ──────────────────────────────────────────────────────────── */
+  function passesNoiseGate(text, confidence) {
+    const t = text.toLowerCase().trim();
+
+    // RULE 1 — reject pure noise sounds and single-character transcripts
+    if (/^(um+|uh+|mm+|ah+|oh+|hmm+|huh|er|erm|shh|background|noise|\.|,|!|\?)$/i.test(t)) return false;
+
+    // RULE 2 — reject if fewer than 2 chars (stray phoneme)
+    if (t.replace(/\s/g,'').length < 2) return false;
+
+    // RULE 3 — reject exact duplicate within 1.5 seconds (mic feedback loop)
+    const now = Date.now();
+    if (t === lastFinalTextRef.current && now - lastFinalTimeRef.current < 1500) return false;
+
+    // RULE 4 — reject if confidence < 0.4 AND less than 3 words (noisy gibberish)
+    const wordCount = t.split(/\s+/).filter(Boolean).length;
+    if (confidence < 0.4 && wordCount < 3) return false;
+
+    // RULE 5 — reject repeating noise pattern (same word heard 3x in history)
+    noiseHistoryRef.current.push(t);
+    if (noiseHistoryRef.current.length > 8) noiseHistoryRef.current.shift();
+    const repeatCount = noiseHistoryRef.current.filter(h => h === t).length;
+    if (repeatCount >= 3) return false;
+
+    return true;
+  }
+
+  /* ── Best Alternative Picker ─────────────────────────────────
+     Web Speech returns up to maxAlternatives transcripts.
+     In noisy environments the top result is often wrong.
+     We pick the alternative that:
+     - Has the highest confidence, OR
+     - Contains a known wake word / menu item keyword
+  ──────────────────────────────────────────────────────────── */
+  const KNOWN_KEYWORDS = [
+    'hey','timmy','timms','tim','order','making','waste','close',
+    'hashbrowns','timbits','coffee','donut','muffin','bagel','sandwich',
+    'croissant','soup','cookie','french','vanilla','steeped','tea',
+    'iced','capp','hot','chocolate','breakfast','wrap','need','want',
+    'give','get','prepare','discard','ready','done','finish','fulfill',
+  ];
+
+  function pickBestAlternative(results) {
+    if (!results.length) return { text: "", confidence: 0 };
+
+    let best = { text: results[0].transcript.trim(), confidence: results[0].confidence || 0.5 };
+
+    for (let i = 1; i < results.length; i++) {
+      const alt   = results[i];
+      const t     = alt.transcript.trim().toLowerCase();
+      const conf  = alt.confidence || 0.3;
+
+      // Boost score if it contains known keywords (domain-specific boost)
+      const keywordHits = KNOWN_KEYWORDS.filter(k => t.includes(k)).length;
+      const boostedConf = conf + keywordHits * 0.08;
+
+      if (boostedConf > best.confidence) {
+        best = { text: alt.transcript.trim(), confidence: boostedConf };
+      }
+    }
+
+    return best;
+  }
 
   const buildRec = useCallback(() => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) return null;
+    if (!SR) { setSupported(false); return null; }
+    setSupported(true);
 
     const rec = new SR();
-    // Mobile needs continuous=false — it auto-fires onend after each phrase
-    // Desktop uses continuous=true for always-on listening
-    rec.continuous     = !isMobile;
-    rec.interimResults = true;
-    rec.lang           = "en-US";
-    rec.maxAlternatives = 3;
+    rec.continuous      = !isMobile;
+    rec.interimResults  = true;
+    rec.lang            = "en-US";
+    rec.maxAlternatives = 5;  // Get 5 alternatives — helps in noisy env
 
     rec.onstart = () => setPermission("granted");
 
     rec.onerror = (e) => {
       if (e.error === "not-allowed") { setPermission("denied"); return; }
-      // On mobile, network errors are common — just restart quietly
-      if (runRef.current && !["aborted","no-speech"].includes(e.error)) {
+      if (e.error === "no-speech") {
+        // Normal in noisy env — just restart quietly
+        if (runRef.current) setTimeout(() => { if (runRef.current) startNew(); }, 200);
+        return;
+      }
+      if (e.error === "audio-capture") {
+        // Mic temporarily lost — retry after short pause
+        if (runRef.current) setTimeout(() => { if (runRef.current) startNew(); }, 1000);
+        return;
+      }
+      if (e.error === "network") {
+        if (runRef.current) setTimeout(() => { if (runRef.current) startNew(); }, 1500);
+        return;
+      }
+      if (runRef.current && e.error !== "aborted") {
         setTimeout(() => { if (runRef.current) startNew(); }, 800);
       }
     };
 
     rec.onend = () => {
-      // Always restart on mobile (each phrase ends recognition)
-      // On desktop, only restart if still enabled
       if (runRef.current) {
-        const delay = isMobile ? 150 : 300;
+        // On mobile: shorter restart gap so we don't miss the next phrase
+        // On desktop: slightly longer to avoid thrashing
+        const delay = isMobile ? 100 : 250;
         setTimeout(() => { if (runRef.current) startNew(); }, delay);
       }
     };
 
     rec.onresult = (ev) => {
+      // Clear silence timer on any result
+      clearTimeout(silenceTimerRef.current);
+
       for (let i = ev.resultIndex; i < ev.results.length; i++) {
         const res = ev.results[i];
-        const text = res[0].transcript.trim();
-        if (!text) continue;
+
         if (res.isFinal) {
-          onFinalRef.current(text, res[0].confidence || 0.85);
+          // Pick best across all alternatives
+          const { text, confidence } = pickBestAlternative(Array.from(res));
+
+          if (!text) continue;
+
+          // Run through noise gate
+          if (!passesNoiseGate(text, confidence)) {
+            console.debug("[VCS] Noise gate rejected:", text, confidence.toFixed(2));
+            continue;
+          }
+
+          // Record for duplicate detection
+          lastFinalTextRef.current = text.toLowerCase().trim();
+          lastFinalTimeRef.current = Date.now();
+
+          onFinalRef.current(text, confidence);
         } else {
-          onInterimRef.current(text);
+          // Show interim text — use top alternative
+          const t = res[0].transcript.trim();
+          if (t.length > 1) onInterimRef.current(t);
         }
       }
     };
@@ -2111,7 +2236,8 @@ export default function App() {
 
     // ── Wake word detection ──
     if (voiceState !== "awake") {
-      if (/(hey timmy|timmy|hey tim|tim hortons)/i.test(text)) {
+      const cleanText = denoiseTranscript(text);
+    if (/\b(hey\s*tim+[msyz]?|hey\s*timmy|timmy|timmie|timms|tims|tim\s*horton[s]?|yo\s*tim|hi\s*tim)\b/i.test(cleanText)) {
         setVoiceState("awake");
         notify("🎙️ Listening…", C.orange);
         TTS.speak(buildWakeResponse());
