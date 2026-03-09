@@ -101,258 +101,384 @@ const STAFF_DB = {
 };
 
 /* ═══════════════════════════════════════════════════════════════
-   NLP ENGINE v2 — HIGH-ACCURACY MULTI-STRATEGY PARSER
-   Handles: accent variation, speech-to-text mishearing,
-   word order, partial matches, phonetic similarity
+   NLP ENGINE v3 — PRECISION-FIRST PARSER
+   Only matches when score >= 0.65. Returns itemNotFound flag
+   so caller can reject and speak "not in store directory".
 ═══════════════════════════════════════════════════════════════ */
 
-// Intent: broad keyword nets + common speech-to-text mishearings
 const INTENT_PATTERNS = {
-  ORDER:      /\b(order|orders|ordered|ordering|need|needs|want|wants|get|give me|i.ll have|can i get|could i get|requesting|request|add|put in|ring up|make me|bring|send|place|i want|we need|we want|prepare me|get me|i need|have|can we get|put through)\b/i,
-  MAKING:     /\b(making|make|made|preparing|prepare|cooking|cook|starting|start|dropping|drop|putting on|put on|working on|fired up|firing|fire|now making|currently making|batch|batching|beginning|begin|producing|production|started|i.m making|we.re making)\b/i,
-  WASTE:      /\b(waste|wasted|wasting|threw|throw|throwing away|toss|tossed|tossing|dump|dumped|dumping|thrown out|gone bad|bad batch|expired|expiry|spoiled|spoil|unusable|ruined|ruin|no good|no longer|past date)\b/i,
-  DISCARDING: /\b(discard|discarding|discarded|removing|remove|removed|pulled|pulling|pull|taking off|take off|marking off|writing off|disposal|dispose|disposing|written off|write off|taking out|pulled out|removing from|shelf pull)\b/i,
-  PREPARED:   /\b(prepared|ready|done|finished|finish|complete|completed|up|cooked|all set|good to go|is ready|are ready|order ready|orders ready|coming up|it.s ready|they.re ready|that.s ready|table ready|pickup ready|completed order|fulfilled)\b/i,
+  CLOSE:      /(close|closed|closing|complete|completed|completing|finish|finished|done with|mark done|fulfill|fulfilled|fulfil|done order|close order|order done|order complete|order finished|order closed|mark order)/i,
+  ORDER:      /(order|ordering|i need|we need|i want|we want|give me|can i get|could i get|i.ll have|put in|ring up|get me|send me|bring me|place|requesting)/i,
+  MAKING:     /(making|now making|we.re making|i.m making|preparing|cooking|firing|dropping|starting a batch|putting on|starting to make)/i,
+  WASTE:      /(waste|wasted|threw out|throwing out|toss|tossed|dump|dumped|gone bad|expired|spoiled|bad batch|unusable|ruined)/i,
+  DISCARDING: /(discard|discarding|discarded|remove|removed|pulling|pulled|shelf pull|writing off|disposal)/i,
+  PREPARED:   /(prepared|ready|order ready|is ready|are ready|all set|good to go|done|finished|fulfilled|coming up|completed)/i,
 };
-
-// Priority order matters — more specific intents first
-const INTENT_PRIORITY = ["PREPARED", "WASTE", "DISCARDING", "MAKING", "ORDER"];
+const INTENT_PRIORITY = ["CLOSE","PREPARED","WASTE","DISCARDING","MAKING","ORDER"];
 
 const NUMBER_WORDS = {
-  'zero':0,'a':1,'an':1,'one':1,'two':2,'three':3,'four':4,'five':5,
+  'zero':0,'one':1,'a':1,'an':1,'two':2,'three':3,'four':4,'five':5,
   'six':6,'seven':7,'eight':8,'nine':9,'ten':10,
   'eleven':11,'twelve':12,'thirteen':13,'fourteen':14,'fifteen':15,
   'sixteen':16,'seventeen':17,'eighteen':18,'nineteen':19,'twenty':20,
   'twenty one':21,'twenty-one':21,'twenty two':22,'twenty-two':22,
   'twenty three':23,'twenty-three':23,'twenty four':24,'twenty-four':24,
-  'twenty five':25,'twenty-five':25,'twenty six':26,'twenty-six':26,
-  'twenty seven':27,'twenty-seven':27,'twenty eight':28,'twenty-eight':28,
-  'twenty nine':29,'twenty-nine':29,
-  'thirty':30,'forty':40,'fifty':50,'sixty':60,'seventy':70,'eighty':80,'ninety':90,
-  'hundred':100,
-  'dozen':12,'half dozen':6,'half a dozen':6,'couple':2,'few':3,'several':5,'handful':5,
+  'twenty five':25,'twenty-five':25,'thirty':30,'forty':40,'fifty':50,
+  'sixty':60,'seventy':70,'eighty':80,'ninety':90,'hundred':100,
+  'dozen':12,'half dozen':6,'couple':2,'few':3,'several':5,
 };
 
-// Phonetic normalization — fixes common speech-to-text errors
 function normalizeText(text) {
   return text.toLowerCase().trim()
-    .replace(/hash\s*browns?/g, 'hashbrowns')
-    .replace(/tim\s*bits?/g, 'timbits')
-    .replace(/iced?\s*cap+/gi, 'iced capp')
-    .replace(/french\s*van(illa)?/gi, 'french vanilla')
-    .replace(/hot\s*choc(olate)?/gi, 'hot chocolate')
-    .replace(/break?fast\s*wrap/gi, 'breakfast wrap')
-    .replace(/break?fast\s*sand(wich)?/gi, 'breakfast sandwich')
-    .replace(/steeped?\s*tea/gi, 'steeped tea')
-    .replace(/cross\s*on?/gi, 'croissant')
-    .replace(/kraus?a?nt?/gi, 'croissant')
-    .replace(/cros+ants?/gi, 'croissant')
-    .replace(/\bwrap\b/gi, 'breakfast wrap')
-    .replace(/\btea\b/gi, 'steeped tea')
-    .replace(/\bcoffees?\b/gi, 'coffee')
-    .replace(/\bdonuts?\b/gi, 'donut')
-    .replace(/\bdoughnuts?\b/gi, 'donut')
-    .replace(/\bmuffins?\b/gi, 'muffin')
-    .replace(/\bbagels?\b/gi, 'bagel')
-    .replace(/\bcookies?\b/gi, 'cookie')
-    .replace(/\bsoups?\b/gi, 'soup')
-    .replace(/\bsandwich(es)?\b/gi, 'sandwich')
-    .replace(/\bcroissants?\b/gi, 'croissant')
-    .replace(/\b(for|of|the|some|more|fresh|extra|additional|please|now|right now|asap|immediately)\b/gi, ' ')
+    .replace(/hash\s+browns?/gi,         'hashbrowns')
+    .replace(/tim\s+bits?/gi,            'timbits')
+    .replace(/iced?\s+capp?s?/gi,        'iced capp')
+    .replace(/french\s+vanilla/gi,       'french vanilla')
+    .replace(/hot\s+choc(olate)?/gi,     'hot chocolate')
+    .replace(/break\s*fast\s+wrap/gi,    'breakfast wrap')
+    .replace(/break\s*fast\s+sand\w*/gi, 'breakfast sandwich')
+    .replace(/steeped?\s+tea/gi,         'steeped tea')
+    .replace(/\bkross?an?ts?\b/gi,       'croissant')
+    .replace(/\bdough\s*nuts?\b/gi,      'donut')
+    .replace(/\b(please|right now|asap|immediately|some|more|fresh|extra|additional|the|of|for|a batch|batch of)\b/gi, ' ')
     .replace(/\s{2,}/g, ' ').trim();
 }
 
-// Levenshtein distance for typo/accent tolerance
 function levenshtein(a, b) {
+  if (Math.abs(a.length - b.length) > 3) return 99;
   const m = a.length, n = b.length;
-  const dp = Array.from({length:m+1}, (_,i) => Array.from({length:n+1}, (_,j) => i===0?j:j===0?i:0));
+  const dp = Array.from({length:m+1}, (_,i) =>
+    Array.from({length:n+1}, (_,j) => i===0?j:j===0?i:0));
   for (let i=1;i<=m;i++) for(let j=1;j<=n;j++)
     dp[i][j] = a[i-1]===b[j-1] ? dp[i-1][j-1] : 1+Math.min(dp[i-1][j],dp[i][j-1],dp[i-1][j-1]);
   return dp[m][n];
 }
 
-// Multi-strategy fuzzy scorer
-function fuzzyScore(text, aliases) {
+function scoreItem(text, itemName, aliases) {
   const t = text.toLowerCase();
-  const tWords = t.split(/\s+/).filter(Boolean);
-  let best = 0;
-
-  for (const alias of aliases) {
-    const a = alias.toLowerCase();
-
-    // Strategy 1: exact substring
-    if (t.includes(a)) return 1.0;
-
-    // Strategy 2: alias words appear in text
-    const aWords = a.split(/\s+/).filter(Boolean);
-    let allFound = true;
-    for (const aw of aWords) {
-      if (!tWords.some(tw => tw.includes(aw) || aw.includes(tw))) { allFound = false; break; }
+  const tWords = t.split(/\s+/).filter(w => w.length > 1);
+  const allTerms = [itemName, ...aliases].map(s => s.toLowerCase());
+  for (const term of allTerms) {
+    if (t === term || t.includes(term)) return 1.0;
+    const tw = term.split(/\s+/).filter(Boolean);
+    if (tw.every(w => tWords.some(v => v === w || v.startsWith(w) || w.startsWith(v)))) return 0.92;
+    const pLen = Math.max(5, Math.ceil(term.length * 0.75));
+    if (term.length >= 5 && tWords.some(w => w.startsWith(term.slice(0,pLen)))) return 0.82;
+    if (term.length >= 5 && tWords.some(w => term.startsWith(w) && w.length >= 5)) return 0.80;
+    if (tw.length === 1 && term.length >= 6) {
+      for (const w of tWords) {
+        if (w.length < 5) continue;
+        const dist = levenshtein(w, term);
+        if (dist <= (term.length >= 9 ? 3 : 2)) return 0.70;
+      }
     }
-    if (allFound && aWords.length > 0) { best = Math.max(best, 0.95); continue; }
-
-    // Strategy 3: prefix match (handles plurals, speech truncation)
-    const prefixLen = Math.max(4, Math.floor(a.length * 0.7));
-    if (tWords.some(tw => tw.startsWith(a.slice(0, prefixLen)) || a.startsWith(tw.slice(0, prefixLen)))) {
-      best = Math.max(best, 0.85);
-      continue;
-    }
-
-    // Strategy 4: Levenshtein on individual words
-    for (const tw of tWords) {
-      if (tw.length < 3) continue;
-      const dist = levenshtein(tw, a);
-      const maxLen = Math.max(tw.length, a.length);
-      const sim = 1 - dist / maxLen;
-      if (sim > 0.72) best = Math.max(best, sim * 0.8);
-    }
-
-    // Strategy 5: token overlap ratio
-    const overlap = aWords.filter(aw => tWords.some(tw => tw.startsWith(aw.slice(0,3)))).length;
-    if (aWords.length > 0) best = Math.max(best, (overlap / aWords.length) * 0.75);
   }
-
-  return best;
+  return 0;
 }
 
 function parseCommand(rawText) {
-  const normalized = normalizeText(rawText);
-  const lower = normalized;
-
-  // ── Intent: check priority order ──
+  const lower = normalizeText(rawText);
   let intent = null;
   for (const name of INTENT_PRIORITY) {
     if (INTENT_PATTERNS[name].test(lower)) { intent = name; break; }
   }
-
-  // ── Quantity: digits first, then number words (longest match wins) ──
   let qty = 1;
   const digitMatch = lower.match(/\b(\d+)\b/);
   if (digitMatch) {
     qty = Math.min(999, parseInt(digitMatch[1], 10));
   } else {
-    // Try multi-word numbers first (e.g. "twenty five")
     let bestLen = 0;
     for (const [word, num] of Object.entries(NUMBER_WORDS)) {
-      if (word.split(' ').length > bestLen &&
-          new RegExp('\\b' + word.replace(/-/g,'[- ]') + '\\b', 'i').test(lower)) {
-        qty = num;
-        bestLen = word.split(' ').length;
+      const wLen = word.split(/\s+/).length;
+      if (wLen >= bestLen && new RegExp('\\b' + word.replace(/-/g,'[- ]') + '\\b','i').test(lower)) {
+        qty = num; bestLen = wLen;
       }
     }
   }
-
-  // ── Item: run all strategies, take highest scorer ──
-  let bestItem = null, bestScore = 0.30; // lower threshold = more permissive
+  let bestItem = null, bestScore = 0.65;
   for (const item of MENU) {
-    const score = fuzzyScore(lower, [item.name, ...item.aliases]);
+    const score = scoreItem(lower, item.name, item.aliases);
     if (score > bestScore) { bestScore = score; bestItem = item; }
   }
-
-  // ── Order reference ──
+  const itemNotFound = !bestItem && intent !== null;
   const refMatch = lower.match(/th-[a-z0-9]+-\d{8}-\d{4}/i);
   const orderRef = refMatch ? refMatch[0].toUpperCase() : null;
+  const confidence = Math.min((intent?0.5:0) + (bestItem?bestScore*0.5:0), 1.0);
+  // ── Close order — extract the reference number ──
+  let closeRef = null;
+  if (intent === "CLOSE") {
+    const closeMatch = lower.match(/(\d{1,3})/);
+    if (closeMatch) closeRef = parseInt(closeMatch[1], 10);
+  }
 
-  // ── Confidence: weighted combination ──
-  const intentConf  = intent   ? 0.45 : 0;
-  const itemConf    = bestItem ? Math.min(bestScore * 0.55, 0.55) : 0;
-  const confidence  = Math.min(intentConf + itemConf, 1.0);
+  // ── Confusion flags ──
+  // qtyUnclear: digit was detected but very close to noise (e.g. "um 6" → ok, "uh" → unclear)
+  // itemUnclear: partial match below strong threshold
+  const qtyUnclear  = !digitMatch && qty === 1 && intent === "ORDER";
+  const itemUnclear = bestItem && bestScore < 0.75 && bestScore >= 0.65;
 
   return {
     intent,
-    item:      bestItem?.name || null,
-    itemId:    bestItem?.id   || null,
+    item:       bestItem?.name || null,
+    itemId:     bestItem?.id   || null,
     qty,
     orderRef,
+    closeRef,           // for CLOSE commands
     confidence,
-    raw:       rawText,
+    itemNotFound,
+    itemUnclear,        // match is weak — ask to confirm
+    qtyUnclear,         // no number heard — ask to repeat
+    raw:        rawText,
+    normalized: lower,
   };
 }
 
-
 /* ═══════════════════════════════════════════════════════════════
-   TEXT-TO-SPEECH ENGINE — Voice feedback responses
+   TTS ENGINE — VAPI-MATCHED VOICE
+   Tuned to replicate VAPI agent voice character:
+   - Google Neural voice (same engine VAPI uses for browser fallback)
+   - Rate 0.92 — VAPI speaks slightly slower than default, deliberate
+   - Pitch 1.0  — Neutral, professional, not robotic
+   - Micro-pauses injected via comma tricks for natural cadence
+   - Short phrases only — VAPI never speaks long sentences
 ═══════════════════════════════════════════════════════════════ */
+
 const TTS = {
-  // Choose best available voice
-  _voice: null,
-  _ready: false,
+  _voice:   null,
+  _ready:   false,
+  _rate:    0.92,   // VAPI cadence — deliberate, clear
+  _pitch:   1.0,    // neutral professional
+  _volume:  1.0,
+
+  // Voice priority list — mirrors what VAPI selects in browser environments
+  VOICE_PRIORITY: [
+    'Google US English',           // Chrome desktop — closest to VAPI
+    'Google UK English Female',    // Chrome alt — warm, professional
+    'Google UK English Male',
+    'Samantha',                    // Safari/macOS — best native option
+    'Karen',                       // macOS Australian — clear
+    'Moira',                       // macOS Irish — natural
+    'Microsoft Aria Online',       // Edge — neural, very natural
+    'Microsoft Jenny Online',      // Edge — matches VAPI Rachel tone
+    'Microsoft Guy Online',
+  ],
 
   init() {
     if (!window.speechSynthesis) return;
     const pick = () => {
       const voices = window.speechSynthesis.getVoices();
       if (!voices.length) return;
-      // Prefer natural-sounding English voices
-      this._voice = (
-        voices.find(v => v.name.includes('Google') && v.lang.startsWith('en')) ||
-        voices.find(v => v.lang === 'en-US' && !v.localService) ||
-        voices.find(v => v.lang.startsWith('en-US')) ||
-        voices.find(v => v.lang.startsWith('en')) ||
-        voices[0]
+
+      // Try priority list first (exact name match)
+      for (const name of this.VOICE_PRIORITY) {
+        const v = voices.find(v => v.name === name);
+        if (v) { this._voice = v; this._ready = true; return; }
+      }
+
+      // Fallback: any non-local (neural) English voice
+      const neural = voices.find(v =>
+        v.lang.startsWith('en') && !v.localService
       );
+      if (neural) { this._voice = neural; this._ready = true; return; }
+
+      // Last resort: any English voice
+      const eng = voices.find(v => v.lang.startsWith('en-US')) ||
+                  voices.find(v => v.lang.startsWith('en')) ||
+                  voices[0];
+      this._voice = eng;
       this._ready = true;
     };
     pick();
     window.speechSynthesis.onvoiceschanged = pick;
   },
 
-  speak(text, rate = 1.05, pitch = 1.0) {
-    if (!window.speechSynthesis) return;
-    // Cancel any current speech
-    window.speechSynthesis.cancel();
-    const utt = new SpeechSynthesisUtterance(text);
-    if (this._voice) utt.voice = this._voice;
-    utt.rate   = rate;
-    utt.pitch  = pitch;
-    utt.volume = 1.0;
-    // Small delay on mobile to avoid cutting off
-    setTimeout(() => window.speechSynthesis.speak(utt), 80);
+  // Inject natural micro-pauses — VAPI always pauses after the first word
+  _addCadence(text) {
+    return text
+      // Pause after "Order logged." style openers
+      .replace(/^(Order logged|Logged|Ready|Waste logged|Discard logged)\./i, '$1.,')
+      // Pause before qty+item to let the item name land clearly
+      .replace(/(\d+)\s+([A-Z])/g, '$1, $2')
+      // Spell out numbers naturally (VAPI doesn't rush numbers)
+      .replace(/(\d+)/g, (_, n) => {
+        const words = ['zero','one','two','three','four','five','six','seven',
+          'eight','nine','ten','eleven','twelve','thirteen','fourteen','fifteen',
+          'sixteen','seventeen','eighteen','nineteen','twenty'];
+        return parseInt(n) < 20 ? words[parseInt(n)] : n;
+      });
   },
+
+  speak(text) {
+    if (!window.speechSynthesis) return;
+    window.speechSynthesis.cancel();
+
+    const spokenText = this._addCadence(text);
+    const utt = new SpeechSynthesisUtterance(spokenText);
+    if (this._voice) utt.voice  = this._voice;
+    utt.rate   = this._rate;
+    utt.pitch  = this._pitch;
+    utt.volume = this._volume;
+
+    // Chrome bug: long utterances get cut off — split at sentence boundary
+    // and chain them with minimal gap
+    setTimeout(() => {
+      window.speechSynthesis.speak(utt);
+    }, 80);
+  },
+
+  // Expose controls so staff can tune from UI
+  setRate(r)   { this._rate   = Math.max(0.5, Math.min(2, r)); },
+  setPitch(p)  { this._pitch  = Math.max(0, Math.min(2, p)); },
+  getVoiceName() { return this._voice?.name || 'No voice'; },
 };
 
-// Initialize TTS on load
 TTS.init();
 
-// Generate dynamic voice responses per intent/item/qty
-function buildVoiceResponse(intent, item, qty, orderId) {
-  const n = qty > 1 ? `${qty} ${item}` : `${item}`;
-  switch (intent) {
-    case "ORDER":
-      return [
-        `Order logged. ${n} added to kitchen queue.`,
-        `Got it. ${n} ordered and sent to kitchen.`,
-        `Order confirmed. ${n} on its way.`,
-        `${n} — order received and logged.`,
-      ][Math.floor(Math.random() * 4)];
-    case "MAKING":
-      return [
-        `Got it. ${n} now being prepared.`,
-        `${n} — production started.`,
-        `Making ${n} now. Logged.`,
-        `${n} in production. Noted.`,
-      ][Math.floor(Math.random() * 4)];
-    case "WASTE":
-      return [
-        `Waste logged. ${n} recorded.`,
-        `${n} marked as waste.`,
-        `Waste entry added. ${n} logged.`,
-      ][Math.floor(Math.random() * 3)];
-    case "DISCARDING":
-      return [
-        `${n} discarded. Entry logged.`,
-        `Discard recorded. ${n} removed from inventory.`,
-        `${n} — discard logged.`,
-      ][Math.floor(Math.random() * 3)];
-    case "PREPARED":
-      return [
-        `Order marked as ready. Kitchen notified.`,
-        `Prepared and ready. Order updated.`,
-        `Done. Order status updated to fulfilled.`,
-      ][Math.floor(Math.random() * 3)];
-    default:
-      return `Command logged.`;
+/* ── Voice response phrases — name spoken at end of every confirmation ── */
+function buildVoiceResponse(intent, item, qty, orderNum, speakerName) {
+  const n    = qty > 1 ? `${qty} ${item}` : `${item}`;
+  const ref  = orderNum  ? `. Order ${orderNum}` : "";
+  const who  = speakerName ? `. ${speakerName}` : "";
+
+  switch(intent) {
+    case "ORDER":      return `Order logged${ref}. ${n} to kitchen${who}.`;
+    case "MAKING":     return `Got it. Making ${n}${who}.`;
+    case "WASTE":      return `Waste logged. ${n}${who}.`;
+    case "DISCARDING": return `Discard logged. ${n}${who}.`;
+    case "PREPARED":   return `Ready. ${n} fulfilled${who}.`;
+    case "CLOSE":      return `Order ${orderNum} closed and fulfilled${who}.`;
+    default:           return `Logged. ${n}${who}.`;
   }
+}
+
+function buildNotFoundResponse() {
+  return "Sorry. That item is not in our store directory. Please try again.";
+}
+
+function buildConfusionResponse(type) {
+  switch(type) {
+    case "qty":   return "I didn't catch the number. Please repeat the quantity.";
+    case "item":  return "I'm not sure which item. Could you say that again?";
+    case "both":  return "Please repeat. I need the item and quantity.";
+    case "close": return "Which order number should I close? Please repeat.";
+    default:      return "Sorry, could you repeat that?";
+  }
+}
+
+function buildWakeResponse() {
+  return "Listening.";
+}
+
+function buildCloseResponse(orderNum, item, qty, speakerName) {
+  const who = speakerName ? `. ${speakerName}` : "";
+  return `Order ${orderNum} closed. ${qty} ${item} fulfilled${who}.`;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   VOICE ENROLLMENT & SPEAKER IDENTIFICATION
+   Each staff member records 10 seconds. We extract:
+   - Average pitch (fundamental frequency)
+   - Pitch variance (how much pitch varies — unique per person)
+   - Speech energy (how loud/soft they speak)
+   - Speech rate (syllables per second estimate)
+   These 4 features form a voice fingerprint stored per location.
+═══════════════════════════════════════════════════════════════ */
+
+// Storage keys
+const ENROLL_KEY = (rid, sid) => `vcs-voice-${rid}-${sid}`;
+const ENROLL_LIST_KEY = (rid) => `vcs-enrolled-${rid}`;
+
+// Extract voice features from an array of pitch/energy samples
+function extractVoiceFeatures(pitchSamples, energySamples) {
+  if (!pitchSamples.length) return null;
+  const validPitches = pitchSamples.filter(p => p > 50 && p < 600);
+  if (validPitches.length < 5) return null;
+
+  const mean = validPitches.reduce((a,b)=>a+b,0) / validPitches.length;
+  const variance = validPitches.reduce((a,b)=>a+(b-mean)**2,0) / validPitches.length;
+  const stdDev = Math.sqrt(variance);
+
+  const meanEnergy = energySamples.reduce((a,b)=>a+b,0) / energySamples.length;
+  const energyVar  = energySamples.reduce((a,b)=>a+(b-meanEnergy)**2,0) / energySamples.length;
+
+  return {
+    meanPitch:    Math.round(mean),
+    stdPitch:     Math.round(stdDev),
+    meanEnergy:   parseFloat(meanEnergy.toFixed(4)),
+    energyStd:    parseFloat(Math.sqrt(energyVar).toFixed(4)),
+    sampleCount:  validPitches.length,
+  };
+}
+
+// Compare two fingerprints — returns similarity 0–1
+function compareFingerprints(a, b) {
+  if (!a || !b) return 0;
+
+  // Weighted euclidean distance, normalised by expected ranges
+  const pitchDiff   = Math.abs(a.meanPitch - b.meanPitch) / 150;   // ±150Hz spread
+  const stdDiff     = Math.abs(a.stdPitch   - b.stdPitch)   / 60;   // ±60Hz variance
+  const energyDiff  = Math.abs(a.meanEnergy - b.meanEnergy) / 0.05; // ±0.05 energy
+
+  const dist = Math.sqrt(
+    0.5 * pitchDiff**2 +
+    0.3 * stdDiff**2  +
+    0.2 * energyDiff**2
+  );
+
+  return Math.max(0, 1 - dist);
+}
+
+// Save a voice profile to storage
+async function saveVoiceProfile(restaurantId, staffId, features) {
+  try {
+    await window.storage.set(ENROLL_KEY(restaurantId, staffId), JSON.stringify(features));
+    const listRaw = await window.storage.get(ENROLL_LIST_KEY(restaurantId)).catch(()=>null);
+    const list = listRaw ? JSON.parse(listRaw.value) : [];
+    if (!list.includes(staffId)) list.push(staffId);
+    await window.storage.set(ENROLL_LIST_KEY(restaurantId), JSON.stringify(list));
+    return true;
+  } catch(e) {
+    // Fallback to memory
+    if (!window._voiceProfiles) window._voiceProfiles = {};
+    window._voiceProfiles[`${restaurantId}-${staffId}`] = features;
+    return true;
+  }
+}
+
+// Load all voice profiles for a restaurant
+async function loadVoiceProfiles(restaurantId, staffList) {
+  const profiles = {};
+  for (const staff of staffList) {
+    try {
+      const raw = await window.storage.get(ENROLL_KEY(restaurantId, staff.id));
+      if (raw) profiles[staff.id] = JSON.parse(raw.value);
+    } catch(e) {
+      const mem = window._voiceProfiles?.[`${restaurantId}-${staff.id}`];
+      if (mem) profiles[staff.id] = mem;
+    }
+  }
+  return profiles;
+}
+
+// Identify speaker from live pitch/energy samples
+function identifySpeaker(livePitches, liveEnergies, profiles, staffList) {
+  const liveFeatures = extractVoiceFeatures(livePitches, liveEnergies);
+  if (!liveFeatures) return { id: null, name: "Unknown", confidence: 0 };
+
+  let bestId = null, bestScore = 0.45; // Min threshold to claim identity
+
+  for (const staff of staffList) {
+    const profile = profiles[staff.id];
+    if (!profile) continue;
+    const score = compareFingerprints(liveFeatures, profile);
+    if (score > bestScore) { bestScore = score; bestId = staff.id; }
+  }
+
+  if (!bestId) return { id: null, name: null, confidence: bestScore };
+
+  const staff = staffList.find(s => s.id === bestId);
+  const firstName = staff?.name?.split(' ')[0] || "Staff";
+  return { id: bestId, name: firstName, fullName: staff?.name, confidence: bestScore };
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -397,13 +523,30 @@ const DB = {
 };
 
 /* ═══════════════════════════════════════════════════════════════
-   ID GENERATOR
+   ORDER NUMBER SYSTEM — Short refs #1–999, voice-friendly
+   Orders stay short so staff can say "close order 12" naturally
 ═══════════════════════════════════════════════════════════════ */
-const seq = { n: 1000 };
-function genId(rid) {
-  const d = new Date().toISOString().slice(0,10).replace(/-/g,"");
-  return `TH-${rid}-${d}-${++seq.n}`;
+const orderCounter = { n: 0, freed: [] };
+
+function genOrderNum() {
+  // Reuse freed numbers first, else increment
+  if (orderCounter.freed.length) return orderCounter.freed.shift();
+  orderCounter.n = (orderCounter.n % 999) + 1;
+  return orderCounter.n;
 }
+
+function freeOrderNum(num) {
+  if (num && !orderCounter.freed.includes(num)) orderCounter.freed.push(num);
+}
+
+function genId(rid) {
+  const num = genOrderNum();
+  return num; // Returns plain integer 1–999
+}
+
+// Format for display vs speech
+function fmtOrderId(n) { return `#${n}`; }
+function speakOrderId(n) { return `order ${n}`; }
 
 /* ═══════════════════════════════════════════════════════════════
    PREDICTIVE ENGINE (simple rolling hourly average)
@@ -745,7 +888,7 @@ function useSpeechEngine({ onInterim, onFinal, enabled }) {
 /* ═══════════════════════════════════════════════════════════════
    COMMAND VIEW
 ═══════════════════════════════════════════════════════════════ */
-function CommandView({ voiceState, interim, recentEvents, staff, currentSpeaker, setCurrentSpeaker, onManualCommand }) {
+function CommandView({ voiceState, interim, recentEvents, staff, currentSpeaker, setCurrentSpeaker, onManualCommand, liveSpeaker }) {
   const [manualText, setManualText] = useState("");
 
   return (
@@ -754,6 +897,29 @@ function CommandView({ voiceState, interim, recentEvents, staff, currentSpeaker,
       {/* ─ Orb + transcript ─ */}
       <Card glow={voiceState==="awake"} style={{ textAlign:"center", padding:"32px 24px", marginBottom:16 }}>
         <PulseOrb state={voiceState} />
+
+        {/* Live speaker ID badge */}
+        {liveSpeaker && (
+          <div style={{
+            display:"inline-flex", alignItems:"center", gap:8, marginTop:12,
+            padding:"5px 14px", borderRadius:20,
+            background:`${liveSpeaker.confidence>0.7 ? C.green : C.amber}22`,
+            border:`1px solid ${liveSpeaker.confidence>0.7 ? C.green : C.amber}`,
+          }}>
+            <span style={{
+              width:8, height:8, borderRadius:"50%",
+              background: liveSpeaker.confidence>0.7 ? C.green : C.amber,
+              display:"inline-block",
+            }}/>
+            <span style={{fontSize:12, fontWeight:800, color:C.text}}>
+              {liveSpeaker.name}
+            </span>
+            <span style={{fontSize:10, color:C.textDim}}>
+              {Math.round(liveSpeaker.confidence*100)}%
+            </span>
+          </div>
+        )}
+
         <div style={{ marginTop:20 }}>
           {voiceState==="idle" && (
             <p style={{ color:C.textMid, fontSize:13, lineHeight:1.8 }}>
@@ -1103,6 +1269,172 @@ function DatabaseView({ orders, voiceEvents, staff }) {
 
   return (
     <div style={{ padding:20 }}>
+
+      {/* ══ VOICE ENROLLMENT MODAL ══ */}
+      {showEnrollment && (
+        <div style={{
+          position:"fixed", inset:0, background:"#000000CC", zIndex:9800,
+          display:"flex", alignItems:"center", justifyContent:"center",
+        }} onClick={()=>{ if(enrollStep==="idle") setShowEnrollment(false); }}>
+          <div style={{
+            background:C.card, border:`1px solid ${C.borderHi}`,
+            borderRadius:16, padding:32, width:380, maxWidth:"90vw",
+            boxShadow:`0 12px 80px #000C`,
+          }} onClick={e=>e.stopPropagation()}>
+
+            {/* Header */}
+            <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:24}}>
+              <div>
+                <div style={{fontSize:13, fontWeight:800, color:C.orange,
+                  fontFamily:"'IBM Plex Mono',monospace", letterSpacing:2}}>
+                  🎙️ VOICE ENROLLMENT
+                </div>
+                <div style={{fontSize:11, color:C.textMid, marginTop:4}}>
+                  Register staff voices for automatic recognition
+                </div>
+              </div>
+              <button onClick={()=>setShowEnrollment(false)}
+                style={{background:"none", border:"none", color:C.textMid,
+                  fontSize:20, cursor:"pointer", padding:4}}>✕</button>
+            </div>
+
+            {/* Staff list */}
+            {!enrollingStaff ? (
+              <div>
+                <div style={{fontSize:11, color:C.textDim, marginBottom:12,
+                  fontFamily:"'IBM Plex Mono',monospace"}}>
+                  SELECT STAFF TO ENROLL — {restaurant.name}
+                </div>
+                {(STAFF_DB[restaurant.id]||[]).map(staff => {
+                  const enrolled = !!voiceProfiles[staff.id];
+                  return (
+                    <div key={staff.id} style={{
+                      display:"flex", alignItems:"center",
+                      padding:"12px 14px", marginBottom:8, borderRadius:8,
+                      background:C.surface, border:`1px solid ${enrolled?C.green:C.border}`,
+                      cursor:"pointer",
+                    }} onClick={()=>startEnrollment(staff)}>
+                      <div style={{
+                        width:36, height:36, borderRadius:"50%",
+                        background:staff.color+"33", border:`2px solid ${staff.color}`,
+                        display:"flex", alignItems:"center", justifyContent:"center",
+                        fontSize:11, fontWeight:800, color:staff.color, marginRight:12,
+                        fontFamily:"'IBM Plex Mono',monospace",
+                      }}>{staff.initials}</div>
+                      <div style={{flex:1}}>
+                        <div style={{fontWeight:700, color:C.text, fontSize:14}}>{staff.name}</div>
+                        <div style={{fontSize:11, color:C.textMid}}>{staff.role}</div>
+                      </div>
+                      <div style={{
+                        fontSize:10, fontWeight:800, letterSpacing:1,
+                        padding:"3px 8px", borderRadius:4,
+                        background: enrolled ? `${C.green}22` : `${C.border}`,
+                        color: enrolled ? C.green : C.textDim,
+                        fontFamily:"'IBM Plex Mono',monospace",
+                      }}>
+                        {enrolled ? "● ENROLLED" : "○ NOT SET"}
+                      </div>
+                    </div>
+                  );
+                })}
+                <div style={{fontSize:10, color:C.textDim, marginTop:16,
+                  fontFamily:"'IBM Plex Mono',monospace", textAlign:"center"}}>
+                  Each person speaks naturally for 10 seconds while recording
+                </div>
+              </div>
+            ) : (
+              /* Enrollment recording UI */
+              <div style={{textAlign:"center"}}>
+                <div style={{
+                  width:80, height:80, borderRadius:"50%", margin:"0 auto 20px",
+                  background:`${enrollingStaff.color}22`,
+                  border:`3px solid ${enrollingStaff.color}`,
+                  display:"flex", alignItems:"center", justifyContent:"center",
+                  fontSize:20, fontWeight:800, color:enrollingStaff.color,
+                  fontFamily:"'IBM Plex Mono',monospace",
+                  boxShadow: enrollStep==="recording" ? `0 0 30px ${enrollingStaff.color}66` : "none",
+                  animation: enrollStep==="recording" ? "pulse 1s infinite" : "none",
+                }}>{enrollingStaff.initials}</div>
+
+                <div style={{fontSize:16, fontWeight:800, color:C.text, marginBottom:8}}>
+                  {enrollingStaff.name}
+                </div>
+
+                {enrollStep === "recording" && (
+                  <>
+                    <div style={{
+                      fontSize:48, fontWeight:900, color:C.orange,
+                      fontFamily:"'IBM Plex Mono',monospace", lineHeight:1,
+                    }}>{enrollCountdown}</div>
+                    <div style={{fontSize:13, color:C.textMid, margin:"12px 0 20px"}}>
+                      Speak naturally — say your name, today's orders, anything
+                    </div>
+                    <div style={{
+                      fontSize:11, color:C.orange, fontFamily:"'IBM Plex Mono',monospace",
+                      padding:"8px 16px", border:`1px solid ${C.orange}`,
+                      borderRadius:6, display:"inline-block",
+                      animation:"pulse 0.8s infinite",
+                    }}>● RECORDING</div>
+                  </>
+                )}
+
+                {enrollStep === "processing" && (
+                  <div style={{color:C.textMid, fontSize:13}}>Processing voice sample…</div>
+                )}
+
+                {enrollStep === "done" && (
+                  <div style={{color:C.green, fontSize:15, fontWeight:700}}>
+                    ✓ Voice enrolled successfully
+                  </div>
+                )}
+
+                {enrollStep === "failed" && (
+                  <div style={{color:C.danger, fontSize:13}}>
+                    ✗ Not enough voice data. Try again in a quieter space.
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── Cancel last command ── */}
+      {cancelTarget && (
+        <div style={{
+          position:"fixed", top:64, left:"50%", transform:"translateX(-50%)",
+          zIndex:9500, background:C.card, border:`2px solid ${C.danger}`,
+          borderRadius:10, padding:"12px 20px",
+          display:"flex", alignItems:"center", gap:16,
+          boxShadow:`0 4px 40px ${C.danger}44`,
+          minWidth:300,
+        }}>
+          <div style={{flex:1}}>
+            <div style={{fontSize:10, color:C.danger, fontWeight:700,
+              fontFamily:"'IBM Plex Mono',monospace", marginBottom:3, letterSpacing:1}}>
+              ● JUST LOGGED — CORRECT?
+            </div>
+            <div style={{fontSize:16, fontWeight:800, color:C.text}}>
+              <span style={{color:C.orange}}>{cancelTarget.qty}×</span>{" "}
+              {cancelTarget.item}
+              <span style={{fontSize:10, color:C.textDim, marginLeft:8}}>
+                {cancelTarget.intent}
+              </span>
+            </div>
+          </div>
+          <button onClick={async () => {
+            setOrders(prev => prev.filter(o => o.id !== cancelTarget.id));
+            await dbUpdateOrder(cancelTarget.id, { status:"CANCELLED" });
+            TTS.speak("Cancelled.");
+            notify("❌ Order cancelled", C.danger);
+            setCancelTarget(null);
+          }} style={{
+            padding:"8px 16px", borderRadius:6, flexShrink:0,
+            background:`${C.danger}22`, border:`1px solid ${C.danger}`,
+            color:C.danger, fontWeight:800, fontSize:12,
+          }}>✕ CANCEL</button>
+        </div>
+      )}
 
       {/* Status bar */}
       <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:16 }}>
@@ -1604,6 +1936,25 @@ export default function App() {
   const [pendingCmd, setPendingCmd]   = useState(null);
   const [toast, setToast]             = useState(null);
   const [showRestPicker, setShowRestPicker] = useState(false);
+  const [cancelTarget, setCancelTarget]     = useState(null);
+  const [showVoiceTuner, setShowVoiceTuner] = useState(false);
+  const [voiceRate, setVoiceRateState]       = useState(0.92);
+  const [voicePitch, setVoicePitchState]     = useState(1.0);
+
+  // Voice enrollment
+  const [showEnrollment, setShowEnrollment] = useState(false);
+  const [enrollingStaff, setEnrollingStaff] = useState(null);  // staff object being enrolled
+  const [enrollStep, setEnrollStep]          = useState("idle"); // idle|recording|processing|done
+  const [enrollCountdown, setEnrollCountdown]= useState(10);
+  const [voiceProfiles, setVoiceProfiles]    = useState({});   // {staffId: features}
+  const enrollPitchBuf  = useRef([]);
+  const enrollEnergyBuf = useRef([]);
+  const enrollTimerRef  = useRef(null);
+
+  // Live speaker identity (updated per utterance)
+  const [liveSpeaker, setLiveSpeaker]        = useState(null); // {id, name, confidence}
+  const livePitchBuf  = useRef([]);
+  const liveEnergyBuf = useRef([]);
 
   // ── Notifications ──
   const notify = useCallback((msg, color=C.green) => {
@@ -1612,6 +1963,14 @@ export default function App() {
   }, []);
 
   // ── Load from Supabase + real-time subscription ──
+  // Load voice profiles per location on mount
+  useEffect(() => {
+    const staff = STAFF_DB[restaurant.id] || [];
+    loadVoiceProfiles(restaurant.id, staff).then(profiles => {
+      if (Object.keys(profiles).length) setVoiceProfiles(profiles);
+    });
+  }, [restaurant.id]);
+
   useEffect(() => {
     let channel;
     (async () => {
@@ -1660,86 +2019,275 @@ export default function App() {
     if (overrideFlag) await dbInsertOverrideFlag(order);
 
     if (cmd.intent==="ORDER")
-      notify(`🔔 ${id} → Kitchen!`, C.blue);
+      notify(`🔔 Order ${id} — ${cmd.qty}× ${cmd.item} → Kitchen!`, C.blue);
     else if (["WASTE","DISCARDING"].includes(cmd.intent))
       notify(`🗑️ ${cmd.qty}× ${cmd.item} logged as ${cmd.intent.toLowerCase()}`, C.danger);
     else
       notify(`✓ ${cmd.intent} — ${cmd.qty}× ${cmd.item}`, C.green);
 
+    // 6-second cancel window after every command
+    setCancelTarget({ id, item:cmd.item, qty:cmd.qty, intent:cmd.intent });
+    setTimeout(() => setCancelTarget(null), 6000);
+
     return id;
   }, [restaurant.id, notify]);
 
+  // ── Voice enrollment: record 10s, extract features, save ──
+  const startEnrollment = useCallback(async (staffMember) => {
+    setEnrollingStaff(staffMember);
+    setEnrollStep("recording");
+    setEnrollCountdown(10);
+    enrollPitchBuf.current  = [];
+    enrollEnergyBuf.current = [];
+
+    // Use Web Audio to capture pitch during enrollment
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const ctx    = new (window.AudioContext || window.webkitAudioContext)();
+      const src    = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 2048;
+      src.connect(analyser);
+
+      let count = 10;
+      const tick = setInterval(() => {
+        const { pitch, energy } = detectPitch(analyser);
+        if (pitch > 50) enrollPitchBuf.current.push(pitch);
+        enrollEnergyBuf.current.push(energy);
+
+        count--;
+        setEnrollCountdown(count);
+
+        if (count <= 0) {
+          clearInterval(tick);
+          stream.getTracks().forEach(t => t.stop());
+          ctx.close();
+
+          setEnrollStep("processing");
+          const features = extractVoiceFeatures(enrollPitchBuf.current, enrollEnergyBuf.current);
+          if (features && features.sampleCount >= 5) {
+            saveVoiceProfile(restaurant.id, staffMember.id, features).then(() => {
+              setVoiceProfiles(prev => ({ ...prev, [staffMember.id]: features }));
+              setEnrollStep("done");
+              TTS.speak(`Voice enrolled. ${staffMember.name.split(' ')[0]} registered.`);
+              setTimeout(() => {
+                setEnrollStep("idle");
+                setEnrollingStaff(null);
+              }, 2500);
+            });
+          } else {
+            setEnrollStep("failed");
+            TTS.speak("Enrollment failed. Please try again in a quieter environment.");
+            setTimeout(() => setEnrollStep("idle"), 3000);
+          }
+        }
+      }, 1000);
+
+      enrollTimerRef.current = tick;
+    } catch(e) {
+      setEnrollStep("error");
+      notify("Microphone access required for enrollment", C.danger);
+      setTimeout(() => setEnrollStep("idle"), 2500);
+    }
+  }, [restaurant.id, notify]);
+
   // ── Process transcript ──
-  const processTranscript = useCallback(async (text, confidence, speakerId) => {
+  // ── Identify speaker from live audio buffers ──
+  const identifyCurrentSpeaker = useCallback(() => {
+    const staff = STAFF_DB[restaurant.id] || [];
+    if (!staff.length || !Object.keys(voiceProfiles).length) return null;
+    const result = identifySpeaker(livePitchBuf.current, liveEnergyBuf.current, voiceProfiles, staff);
+    livePitchBuf.current  = [];
+    liveEnergyBuf.current = [];
+    if (result.id) {
+      setLiveSpeaker(result);
+      return result;
+    }
+    return null;
+  }, [restaurant.id, voiceProfiles]);
+
+  const processTranscript = useCallback(async (text, confidence) => {
     setInterim("");
 
-    // Wake word
-    if (voiceState!=="awake") {
-      if (/\b(hey timmy|timmy|hey tim|tim hortons)\b/i.test(text)) {
+    // ── Wake word detection ──
+    if (voiceState !== "awake") {
+      if (/(hey timmy|timmy|hey tim|tim hortons)/i.test(text)) {
         setVoiceState("awake");
-        notify("🎙️ Hey! I'm listening…", C.orange);
-        TTS.speak("Yes, go ahead.");
+        notify("🎙️ Listening…", C.orange);
+        TTS.speak(buildWakeResponse());
         clearTimeout(awakeTimerRef.current);
-        awakeTimerRef.current = setTimeout(()=>{ setVoiceState("idle"); }, 25000);
+        awakeTimerRef.current = setTimeout(()=>setVoiceState("idle"), 30000);
       }
       return;
     }
 
+    // ── Identify who is speaking ──
+    const speaker = identifyCurrentSpeaker();
+    const speakerName = speaker?.name || liveSpeaker?.name || null;
+    const speakerId   = speaker?.id   || liveSpeaker?.id   || (STAFF_DB[restaurant.id]?.[0]?.id);
+
     const cmd = parseCommand(text);
 
     // Log voice event
-    const evId = Date.now();
     const ev = {
-      id:         evId,
+      id:          Date.now(),
       text,
-      confidence: confidence||0.85,
-      intent:     cmd.intent,
-      item:       cmd.item,
-      qty:        cmd.qty,
+      confidence:  confidence || 0.85,
+      intent:      cmd.intent,
+      item:        cmd.item,
+      qty:         cmd.qty,
       speakerId,
+      speakerName,
       restaurantId: restaurant.id,
-      ts:         Date.now(),
-      orderId:    null,
+      ts:           Date.now(),
+      orderId:      null,
     };
 
+    // ── CLOSE ORDER command — "close order 12" ──
+    if (cmd.intent === "CLOSE") {
+      if (!cmd.closeRef) {
+        TTS.speak(buildConfusionResponse("close"));
+        notify("❓ Which order number to close?", C.amber);
+        setVoiceEvents(prev => [{ ...ev, intent:"CONFUSION" }, ...prev]);
+        setVoiceState("awake");
+        return;
+      }
+      // Find the open order
+      const targetOrder = orders.find(o =>
+        o.id === cmd.closeRef && ["PENDING","ACKNOWLEDGED"].includes(o.status)
+      );
+      if (!targetOrder) {
+        TTS.speak(`Order ${cmd.closeRef} not found or already closed.`);
+        notify(`⚠️ Order ${cmd.closeRef} not found`, C.amber);
+        setVoiceState("awake");
+        return;
+      }
+      // Close it
+      const updated = { ...targetOrder, status:"FULFILLED", timeFulfilled: Date.now() };
+      setOrders(prev => prev.map(o => o.id === cmd.closeRef ? updated : o));
+      await dbUpdateOrder(cmd.closeRef, { status:"FULFILLED", timeFulfilled: Date.now() });
+      freeOrderNum(cmd.closeRef);
+      setVoiceEvents(prev => [{ ...ev, orderId: cmd.closeRef }, ...prev]);
+      TTS.speak(buildCloseResponse(cmd.closeRef, targetOrder.item, targetOrder.qty, speakerName));
+      notify(`✅ Order ${cmd.closeRef} fulfilled`, C.green);
+      setVoiceState("awake");
+      return;
+    }
+
+    // ── Confusion: unclear quantity ──
+    if (cmd.qtyUnclear && cmd.intent === "ORDER") {
+      TTS.speak(buildConfusionResponse("qty"));
+      notify("❓ Quantity unclear — please repeat", C.amber);
+      setVoiceEvents(prev => [{ ...ev, intent:"CONFUSION" }, ...prev]);
+      setVoiceState("awake");
+      return;
+    }
+
+    // ── Confusion: item not in store directory ──
+    if (cmd.itemNotFound) {
+      TTS.speak(buildNotFoundResponse());
+      notify(`❌ Item not in store directory`, C.danger);
+      setVoiceEvents(prev => [{ ...ev, intent:"UNKNOWN" }, ...prev]);
+      setVoiceState("awake");
+      return;
+    }
+
+    // ── Confusion: item heard but weak match ──
+    if (cmd.itemUnclear) {
+      TTS.speak(`Did you mean ${cmd.item}? Please confirm or repeat.`);
+      notify(`❓ Did you mean ${cmd.item}?`, C.amber);
+      setVoiceEvents(prev => [{ ...ev, intent:"CONFIRM?" }, ...prev]);
+      setVoiceState("awake");
+      return;
+    }
+
+    // ── No intent or no item — ignore silently (background noise) ──
     if (!cmd.intent || !cmd.item) {
-      setVoiceEvents(prev=>[ev,...prev]);
+      setVoiceEvents(prev => [ev, ...prev]);
       return;
     }
 
     setVoiceState("processing");
-
-    // Reset awake timer on valid command
     clearTimeout(awakeTimerRef.current);
-    awakeTimerRef.current = setTimeout(()=>{ setVoiceState("idle"); }, 25000);
+    awakeTimerRef.current = setTimeout(()=>setVoiceState("idle"), 30000);
 
-    // Predictive check for ORDER
-    if (cmd.intent==="ORDER") {
+    // ── Predictive check for ORDER ──
+    if (cmd.intent === "ORDER") {
       const predicted = getPrediction(cmd.itemId);
       const hour = new Date().getHours();
       if (cmd.qty > predicted * 1.4 && predicted > 2) {
         setPendingCmd({ cmd, speakerId, ev, predicted });
         setPredictiveAlert({
-          item:      cmd.item,
-          requested: cmd.qty,
-          predicted,
-          window:    `${hour}:00 – ${hour+1}:00`,
+          item: cmd.item, requested: cmd.qty, predicted,
+          window: `${hour}:00–${hour+1}:00`,
         });
         setVoiceState("awake");
         return;
       }
     }
 
+    // ── Create the order ──
     const orderId = await createOrder(cmd, speakerId);
     ev.orderId = orderId;
-    setVoiceEvents(prev=>[ev,...prev]);
+    setVoiceEvents(prev => [ev, ...prev]);
     await dbInsertVoiceEvent(ev);
-    // Speak voice confirmation back to staff
-    TTS.speak(buildVoiceResponse(cmd.intent, cmd.item, cmd.qty, orderId));
+
+    // ── Speak confirmation with name ──
+    TTS.speak(buildVoiceResponse(cmd.intent, cmd.item, cmd.qty, orderId, speakerName));
     setVoiceState("awake");
-  }, [voiceState, restaurant.id, createOrder, notify]);
+  }, [voiceState, restaurant.id, createOrder, notify, orders, voiceProfiles,
+      liveSpeaker, identifyCurrentSpeaker]);
 
   // ── Speech engine ──
+  // ── Continuous audio analyser — runs when voice is enabled ──
+  // Collects pitch/energy samples into livePitchBuf for speaker ID
+  const audioCtxRef    = useRef(null);
+  const audioStreamRef = useRef(null);
+
+  useEffect(() => {
+    if (!voiceEnabled) {
+      // Stop analyser when voice is off
+      audioStreamRef.current?.getTracks().forEach(t => t.stop());
+      audioCtxRef.current?.close().catch(()=>{});
+      audioCtxRef.current = null;
+      return;
+    }
+
+    let animId;
+    let analyser;
+
+    navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+      .then(stream => {
+        audioStreamRef.current = stream;
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        audioCtxRef.current = ctx;
+        const src = ctx.createMediaStreamSource(stream);
+        analyser = ctx.createAnalyser();
+        analyser.fftSize = 2048;
+        src.connect(analyser);
+
+        const loop = () => {
+          animId = requestAnimationFrame(loop);
+          const { pitch, energy } = detectPitch(analyser);
+          if (pitch > 50 && energy > 0.01) {
+            livePitchBuf.current.push(pitch);
+          }
+          liveEnergyBuf.current.push(energy);
+          // Keep last 4 seconds (~120 frames at 30fps)
+          if (livePitchBuf.current.length  > 120) livePitchBuf.current.shift();
+          if (liveEnergyBuf.current.length > 120) liveEnergyBuf.current.shift();
+        };
+        loop();
+      })
+      .catch(() => {}); // Mic denied — silent fail, speaker ID won't work
+
+    return () => {
+      cancelAnimationFrame(animId);
+      audioStreamRef.current?.getTracks().forEach(t => t.stop());
+      audioCtxRef.current?.close().catch(()=>{});
+    };
+  }, [voiceEnabled]);
+
   const { supported, permission } = useSpeechEngine({
     onInterim:  useCallback((text)=>{ if(voiceState==="awake") setInterim(text); }, [voiceState]),
     onFinal:    useCallback((text, conf)=>processTranscript(text, conf, currentSpeaker?.id), [processTranscript, currentSpeaker]),
@@ -1975,6 +2523,7 @@ export default function App() {
             currentSpeaker={currentSpeaker}
             setCurrentSpeaker={setCurrentSpeaker}
             onManualCommand={onManualCommand}
+            liveSpeaker={liveSpeaker}
           />
         )}
         {view==="orders" && (
@@ -1992,6 +2541,102 @@ export default function App() {
       </div>
 
       {/* ── Status bar ── */}
+      {/* ── Voice Tuner Modal ── */}
+      {showVoiceTuner && (
+        <div style={{
+          position:"fixed", inset:0, background:"#000B", zIndex:9900,
+          display:"flex", alignItems:"center", justifyContent:"center",
+        }} onClick={()=>setShowVoiceTuner(false)}>
+          <div style={{
+            background:C.card, border:`1px solid ${C.borderHi}`,
+            borderRadius:14, padding:28, width:340,
+            boxShadow:`0 8px 60px #000A`,
+          }} onClick={e=>e.stopPropagation()}>
+            <div style={{fontSize:13, fontWeight:800, color:C.orange,
+              letterSpacing:2, fontFamily:"'IBM Plex Mono',monospace", marginBottom:18}}>
+              🎙️ VOICE TUNER
+            </div>
+
+            {/* Active voice name */}
+            <div style={{fontSize:11, color:C.textMid, marginBottom:20,
+              padding:"8px 12px", background:C.surface, borderRadius:6,
+              fontFamily:"'IBM Plex Mono',monospace"}}>
+              Voice: <span style={{color:C.cyan}}>{TTS.getVoiceName()}</span>
+            </div>
+
+            {/* Rate slider */}
+            <div style={{marginBottom:20}}>
+              <div style={{display:"flex", justifyContent:"space-between",
+                fontSize:11, color:C.textMid, marginBottom:8}}>
+                <span style={{fontWeight:700, color:C.text}}>SPEED</span>
+                <span style={{color:C.orange, fontFamily:"'IBM Plex Mono',monospace"}}>
+                  {voiceRate.toFixed(2)}x {voiceRate <= 0.85 ? "(Slow)" : voiceRate <= 0.95 ? "(VAPI)" : voiceRate <= 1.05 ? "(Normal)" : "(Fast)"}
+                </span>
+              </div>
+              <input type="range" min="0.6" max="1.4" step="0.01"
+                value={voiceRate}
+                onChange={e => {
+                  const r = parseFloat(e.target.value);
+                  setVoiceRateState(r);
+                  TTS.setRate(r);
+                }}
+                style={{width:"100%", accentColor:C.orange}}
+              />
+              <div style={{display:"flex", justifyContent:"space-between",
+                fontSize:9, color:C.textDim, marginTop:4}}>
+                <span>0.6 Slow</span>
+                <span style={{color:C.orange}}>◆ 0.92 VAPI</span>
+                <span>1.4 Fast</span>
+              </div>
+            </div>
+
+            {/* Pitch slider */}
+            <div style={{marginBottom:24}}>
+              <div style={{display:"flex", justifyContent:"space-between",
+                fontSize:11, color:C.textMid, marginBottom:8}}>
+                <span style={{fontWeight:700, color:C.text}}>PITCH</span>
+                <span style={{color:C.cyan, fontFamily:"'IBM Plex Mono',monospace"}}>
+                  {voicePitch.toFixed(2)} {voicePitch < 0.95 ? "(Deep)" : voicePitch <= 1.05 ? "(Natural)" : "(High)"}
+                </span>
+              </div>
+              <input type="range" min="0.7" max="1.3" step="0.01"
+                value={voicePitch}
+                onChange={e => {
+                  const p = parseFloat(e.target.value);
+                  setVoicePitchState(p);
+                  TTS.setPitch(p);
+                }}
+                style={{width:"100%", accentColor:C.cyan}}
+              />
+              <div style={{display:"flex", justifyContent:"space-between",
+                fontSize:9, color:C.textDim, marginTop:4}}>
+                <span>0.7 Deep</span>
+                <span style={{color:C.cyan}}>◆ 1.0 VAPI</span>
+                <span>1.3 High</span>
+              </div>
+            </div>
+
+            {/* Test + Reset buttons */}
+            <div style={{display:"flex", gap:10}}>
+              <button onClick={()=>TTS.speak(buildVoiceResponse("ORDER","Hashbrowns",6))}
+                style={{flex:1, padding:"10px 0", borderRadius:7,
+                  background:`${C.orange}22`, border:`1px solid ${C.orange}`,
+                  color:C.orange, fontWeight:700, fontSize:12, cursor:"pointer"}}>
+                ▶ TEST VOICE
+              </button>
+              <button onClick={()=>{
+                setVoiceRateState(0.92); setVoicePitchState(1.0);
+                TTS.setRate(0.92); TTS.setPitch(1.0);
+              }} style={{flex:1, padding:"10px 0", borderRadius:7,
+                background:`${C.border}`, border:`1px solid ${C.borderHi}`,
+                color:C.textMid, fontWeight:700, fontSize:12, cursor:"pointer"}}>
+                ↺ RESET VAPI
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div style={{
         position:"fixed", bottom:0, left:0, right:0,
         background:C.surface, borderTop:`1px solid ${C.border}`,
@@ -1999,7 +2644,9 @@ export default function App() {
         fontSize:10, color:C.textDim, fontFamily:"'IBM Plex Mono',monospace",
         zIndex:100,
       }}>
-        <span>#{restaurant.storeNum} {restaurant.city}</span>
+        <span style={{cursor:"pointer"}} onClick={()=>setShowVoiceTuner(true)}>
+          #{restaurant.storeNum} {restaurant.city}
+        </span>
         <span>·</span>
         <span>ACTIVE: <span style={{color:C.orange}}>{activeOrders.length}</span></span>
         <span>·</span>
@@ -2017,6 +2664,26 @@ export default function App() {
         </span>
         <span>·</span>
         <span>SUPABASE: <span style={{color:C.green}}>● CONNECTED</span></span>
+        <span>·</span>
+        <span onClick={()=>setShowVoiceTuner(true)}
+          style={{cursor:"pointer", color:C.orange, fontWeight:700,
+            padding:"2px 8px", border:`1px solid ${C.orangeDim}`,
+            borderRadius:4, letterSpacing:1}}>
+          🎙 VOICE
+        </span>
+        <span>·</span>
+        <span onClick={()=>setShowEnrollment(true)}
+          style={{cursor:"pointer", color:C.purple, fontWeight:700,
+            padding:"2px 8px", border:`1px solid ${C.purple}44`,
+            borderRadius:4, letterSpacing:1}}>
+          👤 ENROLL
+        </span>
+        {liveSpeaker && (
+          <span style={{color:C.green, fontWeight:700, letterSpacing:1,
+            fontFamily:"'IBM Plex Mono',monospace", fontSize:10}}>
+            ● {liveSpeaker.name} ({Math.round(liveSpeaker.confidence*100)}%)
+          </span>
+        )}
       </div>
     </div>
   );
