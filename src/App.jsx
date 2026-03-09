@@ -101,82 +101,258 @@ const STAFF_DB = {
 };
 
 /* ═══════════════════════════════════════════════════════════════
-   NLP ENGINE — BEST-IN-CLASS PARSING
+   NLP ENGINE v2 — HIGH-ACCURACY MULTI-STRATEGY PARSER
+   Handles: accent variation, speech-to-text mishearing,
+   word order, partial matches, phonetic similarity
 ═══════════════════════════════════════════════════════════════ */
+
+// Intent: broad keyword nets + common speech-to-text mishearings
 const INTENT_PATTERNS = {
-  ORDER:      [/\b(order|need|want|get|give me|i'll have|can i get|requesting|add|put in|ring up|make me|bring|send)\b/i],
-  MAKING:     [/\b(making|preparing|cooking|starting|dropping|putting on|working on|fired up|firing)\b/i],
-  WASTE:      [/\b(waste|wasted|threw|throwing away|toss|tossing|dump|dumping|thrown out)\b/i],
-  DISCARDING: [/\b(discard|discarding|removing|pulled|pulling|taking off|marking off|writing off|disposal)\b/i],
-  PREPARED:   [/\b(prepared|ready|done|finished|complete|completed|up|cooked|all set|good to go|order.*ready|is ready|are ready)\b/i],
+  ORDER:      /\b(order|orders|ordered|ordering|need|needs|want|wants|get|give me|i.ll have|can i get|could i get|requesting|request|add|put in|ring up|make me|bring|send|place|i want|we need|we want|prepare me|get me|i need|have|can we get|put through)\b/i,
+  MAKING:     /\b(making|make|made|preparing|prepare|cooking|cook|starting|start|dropping|drop|putting on|put on|working on|fired up|firing|fire|now making|currently making|batch|batching|beginning|begin|producing|production|started|i.m making|we.re making)\b/i,
+  WASTE:      /\b(waste|wasted|wasting|threw|throw|throwing away|toss|tossed|tossing|dump|dumped|dumping|thrown out|gone bad|bad batch|expired|expiry|spoiled|spoil|unusable|ruined|ruin|no good|no longer|past date)\b/i,
+  DISCARDING: /\b(discard|discarding|discarded|removing|remove|removed|pulled|pulling|pull|taking off|take off|marking off|writing off|disposal|dispose|disposing|written off|write off|taking out|pulled out|removing from|shelf pull)\b/i,
+  PREPARED:   /\b(prepared|ready|done|finished|finish|complete|completed|up|cooked|all set|good to go|is ready|are ready|order ready|orders ready|coming up|it.s ready|they.re ready|that.s ready|table ready|pickup ready|completed order|fulfilled)\b/i,
 };
+
+// Priority order matters — more specific intents first
+const INTENT_PRIORITY = ["PREPARED", "WASTE", "DISCARDING", "MAKING", "ORDER"];
 
 const NUMBER_WORDS = {
-  'a': 1, 'an': 1, 'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
-  'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10,
-  'eleven': 11, 'twelve': 12, 'thirteen': 13, 'fourteen': 14, 'fifteen': 15,
-  'sixteen': 16, 'seventeen': 17, 'eighteen': 18, 'nineteen': 19, 'twenty': 20,
-  'twenty-one': 21, 'twenty one': 21, 'twenty-five': 25, 'twenty five': 25,
-  'thirty': 30, 'forty': 40, 'fifty': 50, 'sixty': 60,
-  'dozen': 12, 'half dozen': 6, 'couple': 2, 'few': 3, 'several': 5,
+  'zero':0,'a':1,'an':1,'one':1,'two':2,'three':3,'four':4,'five':5,
+  'six':6,'seven':7,'eight':8,'nine':9,'ten':10,
+  'eleven':11,'twelve':12,'thirteen':13,'fourteen':14,'fifteen':15,
+  'sixteen':16,'seventeen':17,'eighteen':18,'nineteen':19,'twenty':20,
+  'twenty one':21,'twenty-one':21,'twenty two':22,'twenty-two':22,
+  'twenty three':23,'twenty-three':23,'twenty four':24,'twenty-four':24,
+  'twenty five':25,'twenty-five':25,'twenty six':26,'twenty-six':26,
+  'twenty seven':27,'twenty-seven':27,'twenty eight':28,'twenty-eight':28,
+  'twenty nine':29,'twenty-nine':29,
+  'thirty':30,'forty':40,'fifty':50,'sixty':60,'seventy':70,'eighty':80,'ninety':90,
+  'hundred':100,
+  'dozen':12,'half dozen':6,'half a dozen':6,'couple':2,'few':3,'several':5,'handful':5,
 };
 
+// Phonetic normalization — fixes common speech-to-text errors
+function normalizeText(text) {
+  return text.toLowerCase().trim()
+    .replace(/hash\s*browns?/g, 'hashbrowns')
+    .replace(/tim\s*bits?/g, 'timbits')
+    .replace(/iced?\s*cap+/gi, 'iced capp')
+    .replace(/french\s*van(illa)?/gi, 'french vanilla')
+    .replace(/hot\s*choc(olate)?/gi, 'hot chocolate')
+    .replace(/break?fast\s*wrap/gi, 'breakfast wrap')
+    .replace(/break?fast\s*sand(wich)?/gi, 'breakfast sandwich')
+    .replace(/steeped?\s*tea/gi, 'steeped tea')
+    .replace(/cross\s*on?/gi, 'croissant')
+    .replace(/kraus?a?nt?/gi, 'croissant')
+    .replace(/cros+ants?/gi, 'croissant')
+    .replace(/\bwrap\b/gi, 'breakfast wrap')
+    .replace(/\btea\b/gi, 'steeped tea')
+    .replace(/\bcoffees?\b/gi, 'coffee')
+    .replace(/\bdonuts?\b/gi, 'donut')
+    .replace(/\bdoughnuts?\b/gi, 'donut')
+    .replace(/\bmuffins?\b/gi, 'muffin')
+    .replace(/\bbagels?\b/gi, 'bagel')
+    .replace(/\bcookies?\b/gi, 'cookie')
+    .replace(/\bsoups?\b/gi, 'soup')
+    .replace(/\bsandwich(es)?\b/gi, 'sandwich')
+    .replace(/\bcroissants?\b/gi, 'croissant')
+    .replace(/\b(for|of|the|some|more|fresh|extra|additional|please|now|right now|asap|immediately)\b/gi, ' ')
+    .replace(/\s{2,}/g, ' ').trim();
+}
+
+// Levenshtein distance for typo/accent tolerance
+function levenshtein(a, b) {
+  const m = a.length, n = b.length;
+  const dp = Array.from({length:m+1}, (_,i) => Array.from({length:n+1}, (_,j) => i===0?j:j===0?i:0));
+  for (let i=1;i<=m;i++) for(let j=1;j<=n;j++)
+    dp[i][j] = a[i-1]===b[j-1] ? dp[i-1][j-1] : 1+Math.min(dp[i-1][j],dp[i][j-1],dp[i-1][j-1]);
+  return dp[m][n];
+}
+
+// Multi-strategy fuzzy scorer
 function fuzzyScore(text, aliases) {
   const t = text.toLowerCase();
+  const tWords = t.split(/\s+/).filter(Boolean);
+  let best = 0;
+
   for (const alias of aliases) {
     const a = alias.toLowerCase();
+
+    // Strategy 1: exact substring
     if (t.includes(a)) return 1.0;
-  }
-  // Word-level partial match
-  const tWords = t.split(/\s+/);
-  let best = 0;
-  for (const alias of aliases) {
-    const aWords = alias.toLowerCase().split(/\s+/);
-    let matched = 0;
+
+    // Strategy 2: alias words appear in text
+    const aWords = a.split(/\s+/).filter(Boolean);
+    let allFound = true;
     for (const aw of aWords) {
-      if (tWords.some(tw => tw.startsWith(aw.slice(0, 4)) || aw.startsWith(tw.slice(0, 4)))) matched++;
+      if (!tWords.some(tw => tw.includes(aw) || aw.includes(tw))) { allFound = false; break; }
     }
-    const score = matched / aWords.length;
-    if (score > best) best = score;
+    if (allFound && aWords.length > 0) { best = Math.max(best, 0.95); continue; }
+
+    // Strategy 3: prefix match (handles plurals, speech truncation)
+    const prefixLen = Math.max(4, Math.floor(a.length * 0.7));
+    if (tWords.some(tw => tw.startsWith(a.slice(0, prefixLen)) || a.startsWith(tw.slice(0, prefixLen)))) {
+      best = Math.max(best, 0.85);
+      continue;
+    }
+
+    // Strategy 4: Levenshtein on individual words
+    for (const tw of tWords) {
+      if (tw.length < 3) continue;
+      const dist = levenshtein(tw, a);
+      const maxLen = Math.max(tw.length, a.length);
+      const sim = 1 - dist / maxLen;
+      if (sim > 0.72) best = Math.max(best, sim * 0.8);
+    }
+
+    // Strategy 5: token overlap ratio
+    const overlap = aWords.filter(aw => tWords.some(tw => tw.startsWith(aw.slice(0,3)))).length;
+    if (aWords.length > 0) best = Math.max(best, (overlap / aWords.length) * 0.75);
   }
+
   return best;
 }
 
-function parseCommand(text) {
-  const lower = text.toLowerCase().trim();
+function parseCommand(rawText) {
+  const normalized = normalizeText(rawText);
+  const lower = normalized;
 
-  // ── Intent ──
+  // ── Intent: check priority order ──
   let intent = null;
-  for (const [name, patterns] of Object.entries(INTENT_PATTERNS)) {
-    if (patterns.some(p => p.test(lower))) { intent = name; break; }
+  for (const name of INTENT_PRIORITY) {
+    if (INTENT_PATTERNS[name].test(lower)) { intent = name; break; }
   }
 
-  // ── Quantity ──
+  // ── Quantity: digits first, then number words (longest match wins) ──
   let qty = 1;
   const digitMatch = lower.match(/\b(\d+)\b/);
   if (digitMatch) {
-    qty = parseInt(digitMatch[1], 10);
+    qty = Math.min(999, parseInt(digitMatch[1], 10));
   } else {
+    // Try multi-word numbers first (e.g. "twenty five")
+    let bestLen = 0;
     for (const [word, num] of Object.entries(NUMBER_WORDS)) {
-      if (new RegExp(`\\b${word}\\b`, 'i').test(lower)) { qty = num; break; }
+      if (word.split(' ').length > bestLen &&
+          new RegExp('\\b' + word.replace(/-/g,'[- ]') + '\\b', 'i').test(lower)) {
+        qty = num;
+        bestLen = word.split(' ').length;
+      }
     }
   }
 
-  // ── Item (fuzzy) ──
-  let bestItem = null, bestScore = 0.35;
+  // ── Item: run all strategies, take highest scorer ──
+  let bestItem = null, bestScore = 0.30; // lower threshold = more permissive
   for (const item of MENU) {
     const score = fuzzyScore(lower, [item.name, ...item.aliases]);
     if (score > bestScore) { bestScore = score; bestItem = item; }
   }
 
-  // ── Order reference (for PREPARED / cross-reference) ──
+  // ── Order reference ──
   const refMatch = lower.match(/th-[a-z0-9]+-\d{8}-\d{4}/i);
   const orderRef = refMatch ? refMatch[0].toUpperCase() : null;
 
-  const confidence = (intent ? 0.5 : 0) + (bestItem ? bestScore * 0.5 : 0);
+  // ── Confidence: weighted combination ──
+  const intentConf  = intent   ? 0.45 : 0;
+  const itemConf    = bestItem ? Math.min(bestScore * 0.55, 0.55) : 0;
+  const confidence  = Math.min(intentConf + itemConf, 1.0);
 
-  return { intent, item: bestItem?.name || null, itemId: bestItem?.id || null,
-           qty, orderRef, confidence, raw: text };
+  return {
+    intent,
+    item:      bestItem?.name || null,
+    itemId:    bestItem?.id   || null,
+    qty,
+    orderRef,
+    confidence,
+    raw:       rawText,
+  };
+}
+
+
+/* ═══════════════════════════════════════════════════════════════
+   TEXT-TO-SPEECH ENGINE — Voice feedback responses
+═══════════════════════════════════════════════════════════════ */
+const TTS = {
+  // Choose best available voice
+  _voice: null,
+  _ready: false,
+
+  init() {
+    if (!window.speechSynthesis) return;
+    const pick = () => {
+      const voices = window.speechSynthesis.getVoices();
+      if (!voices.length) return;
+      // Prefer natural-sounding English voices
+      this._voice = (
+        voices.find(v => v.name.includes('Google') && v.lang.startsWith('en')) ||
+        voices.find(v => v.lang === 'en-US' && !v.localService) ||
+        voices.find(v => v.lang.startsWith('en-US')) ||
+        voices.find(v => v.lang.startsWith('en')) ||
+        voices[0]
+      );
+      this._ready = true;
+    };
+    pick();
+    window.speechSynthesis.onvoiceschanged = pick;
+  },
+
+  speak(text, rate = 1.05, pitch = 1.0) {
+    if (!window.speechSynthesis) return;
+    // Cancel any current speech
+    window.speechSynthesis.cancel();
+    const utt = new SpeechSynthesisUtterance(text);
+    if (this._voice) utt.voice = this._voice;
+    utt.rate   = rate;
+    utt.pitch  = pitch;
+    utt.volume = 1.0;
+    // Small delay on mobile to avoid cutting off
+    setTimeout(() => window.speechSynthesis.speak(utt), 80);
+  },
+};
+
+// Initialize TTS on load
+TTS.init();
+
+// Generate dynamic voice responses per intent/item/qty
+function buildVoiceResponse(intent, item, qty, orderId) {
+  const n = qty > 1 ? `${qty} ${item}` : `${item}`;
+  switch (intent) {
+    case "ORDER":
+      return [
+        `Order logged. ${n} added to kitchen queue.`,
+        `Got it. ${n} ordered and sent to kitchen.`,
+        `Order confirmed. ${n} on its way.`,
+        `${n} — order received and logged.`,
+      ][Math.floor(Math.random() * 4)];
+    case "MAKING":
+      return [
+        `Got it. ${n} now being prepared.`,
+        `${n} — production started.`,
+        `Making ${n} now. Logged.`,
+        `${n} in production. Noted.`,
+      ][Math.floor(Math.random() * 4)];
+    case "WASTE":
+      return [
+        `Waste logged. ${n} recorded.`,
+        `${n} marked as waste.`,
+        `Waste entry added. ${n} logged.`,
+      ][Math.floor(Math.random() * 3)];
+    case "DISCARDING":
+      return [
+        `${n} discarded. Entry logged.`,
+        `Discard recorded. ${n} removed from inventory.`,
+        `${n} — discard logged.`,
+      ][Math.floor(Math.random() * 3)];
+    case "PREPARED":
+      return [
+        `Order marked as ready. Kitchen notified.`,
+        `Prepared and ready. Order updated.`,
+        `Done. Order status updated to fulfilled.`,
+      ][Math.floor(Math.random() * 3)];
+    default:
+      return `Command logged.`;
+  }
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -1502,6 +1678,7 @@ export default function App() {
       if (/\b(hey timmy|timmy|hey tim|tim hortons)\b/i.test(text)) {
         setVoiceState("awake");
         notify("🎙️ Hey! I'm listening…", C.orange);
+        TTS.speak("Yes, go ahead.");
         clearTimeout(awakeTimerRef.current);
         awakeTimerRef.current = setTimeout(()=>{ setVoiceState("idle"); }, 25000);
       }
@@ -1557,6 +1734,8 @@ export default function App() {
     ev.orderId = orderId;
     setVoiceEvents(prev=>[ev,...prev]);
     await dbInsertVoiceEvent(ev);
+    // Speak voice confirmation back to staff
+    TTS.speak(buildVoiceResponse(cmd.intent, cmd.item, cmd.qty, orderId));
     setVoiceState("awake");
   }, [voiceState, restaurant.id, createOrder, notify]);
 
@@ -1610,6 +1789,7 @@ export default function App() {
     const orderId = await createOrder(adjusted, speakerId, false, predicted);
     setVoiceEvents(prev=>[{...ev, orderId},...prev]);
     notify(`✓ Adjusted to ${predicted} units`, C.green);
+    TTS.speak(`Order confirmed. Adjusted to ${predicted} ${adjusted.item}.`);
     setPredictiveAlert(null); setPendingCmd(null);
   }, [pendingCmd, createOrder, notify]);
 
@@ -1619,6 +1799,7 @@ export default function App() {
     const orderId = await createOrder(cmd, speakerId, true, predicted);
     setVoiceEvents(prev=>[{...ev, orderId},...prev]);
     notify(`⚑ Override logged — ${cmd.qty} units`, C.amber);
+    TTS.speak(`Override logged. ${cmd.qty} ${cmd.item} ordered. Flagged for review.`);
     setPredictiveAlert(null); setPendingCmd(null);
   }, [pendingCmd, createOrder, notify]);
 
